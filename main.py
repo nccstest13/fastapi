@@ -108,14 +108,12 @@ async def whois_lookup(request: DomainsRequest):
                 logger.debug(f"Extracted 'result' field for {domain}: {res}")
 
                 results.append({
-                    "domain": domain,
-                    "full_raw_response": data,  # Full raw JSON for inspection
+                    "domain": domain,                    
                     "creation_date": res.get("creation_date", "No information"),
                     "registrar": res.get("registrar", "No information"),
                     "status": ", ".join(res.get("status")) if isinstance(res.get("status"), list) else res.get("status", "No information"),
                     "name_servers": ", ".join([ns.lower() for ns in res.get("name_servers", [])]) if isinstance(res.get("name_servers"), list) else res.get("name_servers", "No information"),
-                    "expiration_date": res.get("expiration_date"),
-                    "result": "success"
+                    "expiration_date": res.get("expiration_date"),                   
                 })
 
     return {"results": results, "minRemainingDay": min_remaining_day}
