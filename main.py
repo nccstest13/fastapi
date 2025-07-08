@@ -1,8 +1,13 @@
 import os
-from fastapi import FastAPI, Request, HTTPException
+import logging
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import httpx
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -29,9 +34,14 @@ async def whois_lookup(request: DomainsRequest):
     async with httpx.AsyncClient() as client:
         for domain in domains:
             url = f"https://api.apilayer.com/whois/query?domain={domain}"
+            logger.debug(f"Fetching WHOIS data for domain: {domain}")
             try:
                 resp = await client.get(url, headers=headers)
+                logger.debug(f"Response status code for {domain}: {resp.status_code}")
+                logger.debug(f"Full API response text for {domain}: {resp.text}")
+
             except httpx.RequestError as e:
+                logger.error(f"Request error for domain {domain}: {str(e)}")
                 results.append({
                     "domain": domain,
                     "result": "error",
@@ -40,8 +50,10 @@ async def whois_lookup(request: DomainsRequest):
                 continue
 
             if resp.status_code == 429:
+                logger.error(f"Rate limit exceeded while querying {domain}")
                 raise HTTPException(status_code=429, detail="Too many requests. Rate limit exceeded.")
             if resp.status_code >= 500:
+                logger.error(f"Upstream WHOIS API provider error while querying {domain}")
                 raise HTTPException(status_code=502, detail="Upstream WHOIS API provider error.")
 
             day_remaining_str = resp.headers.get("X-RateLimit-Remaining-Day")
@@ -50,12 +62,15 @@ async def whois_lookup(request: DomainsRequest):
                     day_remaining = int(day_remaining_str)
                     if min_remaining_day is None or day_remaining < min_remaining_day:
                         min_remaining_day = day_remaining
+                    logger.debug(f"Rate limit remaining today: {day_remaining}")
                 except ValueError:
-                    pass
+                    logger.warning(f"Invalid rate limit header value: {day_remaining_str}")
 
             try:
                 data = resp.json()
-            except Exception:
+                logger.debug(f"Parsed JSON data for {domain}: {data}")
+            except Exception as e:
+                logger.error(f"Invalid JSON response for {domain}: {str(e)}")
                 results.append({
                     "domain": domain,
                     "result": "error",
@@ -64,17 +79,20 @@ async def whois_lookup(request: DomainsRequest):
                 continue
 
             if data.get("result") == "error":
+                logger.error(f"API returned error for {domain}: {data.get('message')}")
                 results.append({
                     "domain": domain,
                     "result": "error",
                     "message": data.get("message", "Unknown error")
                 })
             else:
-                # Defensive data extraction
+                # Defensive data extraction with logging
                 res = data.get("result", {})
+                logger.debug(f"Extracted 'result' field for {domain}: {res}")
 
                 results.append({
                     "domain": domain,
+                    "full_raw_response": data,  # Full raw JSON for inspection
                     "creation_date": res.get("creation_date", "No information"),
                     "registrar": res.get("registrar", "No information"),
                     "status": ", ".join(res.get("status")) if isinstance(res.get("status"), list) else res.get("status", "No information"),
@@ -82,6 +100,5 @@ async def whois_lookup(request: DomainsRequest):
                     "expiration_date": res.get("expiration_date"),
                     "result": "success"
                 })
-
 
     return {"results": results, "minRemainingDay": min_remaining_day}
