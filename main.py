@@ -71,7 +71,8 @@ async def whois_lookup(request: DomainsRequest):
                 })
             else:
                 # Defensive data extraction
-                res = data
+                res = data.get("result", {})
+
                 results.append({
                     "domain": domain,
                     "creation_date": res.get("creation_date", "No information"),
@@ -81,5 +82,6 @@ async def whois_lookup(request: DomainsRequest):
                     "expiration_date": res.get("expiration_date"),
                     "result": "success"
                 })
+
 
     return {"results": results, "minRemainingDay": min_remaining_day}
