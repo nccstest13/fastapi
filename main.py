@@ -6,6 +6,9 @@ from pydantic import BaseModel
 from typing import List, Optional
 import httpx
 
+from fastapi.middleware.cors import CORSMiddleware
+
+
 # Configure logging explicitly to stdout with formatter
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -27,6 +30,15 @@ else:
     logger.addHandler(handler)
 
 app = FastAPI()
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Or your domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 API_KEY = os.getenv("APILAYER_KEY")
 if not API_KEY:
