@@ -124,7 +124,7 @@ async def whois_lookup(request: DomainsRequest):
                     "creation_date": res.get("creation_date", "No information"),
                     "registrar": res.get("registrar", "No information"),
                     "status": ", ".join(res.get("status")) if isinstance(res.get("status"), list) else res.get("status", "No information"),
-                   name_servers: Array.isArray(data.result.name_servers)   ? data.result.name_servers.join('<br>')   : (data.result.name_servers || 'No information'),
+                    "name_servers": Array.isArray(data.result.name_servers) ? data.result.name_servers.join('<br>')   : (data.result.name_servers || 'No information'),
                     "expiration_date": res.get("expiration_date"),                   
                 })
 
