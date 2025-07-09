@@ -1,134 +1,128 @@
 import os
 import sys
 import logging
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional, Dict
 import httpx
-from fastapi.middleware.cors import CORSMiddleware
+from httpx import ReadTimeout, RequestError
+import whoisdomain
+import asyncio
+from datetime import datetime, timedelta
 
-# --- LOGGING SETUP ---
+# Setup logging to stdout with formatter
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
+if not logger.hasHandlers():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+else:
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
-# Clear existing handlers
-for h in logger.handlers:
-    logger.removeHandler(h)
-
-# Add a single StreamHandler
-handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-# --- FASTAPI SETUP ---
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Use specific domain in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 API_KEY = os.getenv("APILAYER_KEY")
 if not API_KEY:
     raise RuntimeError("APILAYER_KEY env var is not set")
 
-class DomainsRequest(BaseModel):
-    domains: List[str]
+class DomainRequest(BaseModel):
+    domain: str
+
+# Simple in-memory cache: domain -> (result_dict, expiry_datetime)
+cache: Dict[str, tuple] = {}
+CACHE_TTL = timedelta(hours=1)
+
+async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict):
+    url = f"https://api.apilayer.com/whois/query?domain={domain}"
+    resp = await client.get(url, headers=headers, timeout=10.0)
+    resp.raise_for_status()
+    return resp.json()
 
 @app.post("/whois")
-async def whois_lookup(request: DomainsRequest):
-    domains = request.domains
-    if not domains:
-        raise HTTPException(status_code=400, detail="Invalid domains list")
+async def whois_lookup(request: DomainRequest):
+    domain = request.domain.lower().strip()
+    now = datetime.utcnow()
 
-    results = []
-    min_remaining_day: Optional[int] = None
+    # Check cache first
+    cached = cache.get(domain)
+    if cached and cached[1] > now:
+        logger.debug(f"Cache hit for domain: {domain}")
+        return cached[0]
+    else:
+        if cached:
+            logger.debug(f"Cache expired for domain: {domain}")
 
-    headers = { "apikey": API_KEY }
-
+    headers = {"apikey": API_KEY}
     async with httpx.AsyncClient() as client:
-        for domain in domains:
-            url = f"https://api.apilayer.com/whois/query?domain={domain}"
-            logger.debug(f"Requesting WHOIS for: {domain}")
-
+        try:
+            # Try API lookup with retry on timeout
             try:
-                resp = await client.get(url, headers=headers, timeout=10.0)
-                logger.debug(f"[{domain}] Status code: {resp.status_code}")
-                logger.debug(f"[{domain}] Raw response: {resp.text}")
-            except httpx.ReadTimeout:
-                logger.error(f"[{domain}] Timeout occurred.")
-                results.append({
-                    "domain": domain,
-                    "result": "error",
-                    "message": "Timeout on the end of upstream provider. Try again later"
-                })
-                continue
-            except httpx.RequestError as e:
-                logger.error(f"[{domain}] Request error: {str(e)}")
-                results.append({
-                    "domain": domain,
-                    "result": "error",
-                    "message": f"Request error: {str(e)}"
-                })
-                continue
+                data = await fetch_whois_api(client, domain, headers)
+                lookup_type = "whois_api"
+            except ReadTimeout:
+                logger.warning(f"Timeout on API lookup for {domain}, retrying once...")
+                data = await fetch_whois_api(client, domain, headers)
+                lookup_type = "whois_api"
+        except (ReadTimeout, RequestError) as e:
+            # Fallback to local whoisdomain on any API timeout or request error
+            logger.warning(f"API lookup failed for {domain} with error: {str(e)}. Falling back to local lookup.")
+            lookup_type = "local"
+            data = None
 
-            if resp.status_code == 429:
-                logger.warning(f"[{domain}] Rate limit exceeded.")
-                raise HTTPException(status_code=429, detail="Too many requests. Rate limit exceeded.")
-
-            if resp.status_code >= 500:
-                logger.error(f"[{domain}] Upstream server error.")
-                raise HTTPException(status_code=502, detail="Upstream WHOIS API provider error.")
-
-            # Rate limit header
-            day_remaining_str = resp.headers.get("X-RateLimit-Remaining-Day")
-            if day_remaining_str:
-                try:
-                    day_remaining = int(day_remaining_str)
-                    if min_remaining_day is None or day_remaining < min_remaining_day:
-                        min_remaining_day = day_remaining
-                    logger.debug(f"[{domain}] X-RateLimit-Remaining-Day: {day_remaining}")
-                except ValueError:
-                    logger.warning(f"[{domain}] Invalid rate limit header: {day_remaining_str}")
-
-            # Parse JSON
-            try:
-                data = resp.json()
-                logger.debug(f"[{domain}] Parsed JSON: {data}")
-            except Exception as e:
-                logger.error(f"[{domain}] JSON parse error: {str(e)}")
-                results.append({
-                    "domain": domain,
-                    "result": "error",
-                    "message": "Invalid JSON response from API"
-                })
-                continue
-
-            if data.get("result") == "error":
-                logger.warning(f"[{domain}] API returned error: {data.get('message')}")
-                results.append({
-                    "domain": domain,
-                    "result": "error",
-                    "message": data.get("message", "Unknown error")
-                })
-                continue
-
+    if lookup_type == "local":
+        try:
+            w = whoisdomain.Whois(domain)
+            logger.debug(f"Local WHOIS raw data for {domain}: {vars(w)}")
+            result = {
+                "domain": domain,
+                "creation_date": w.creation_date or "No information",
+                "registrar": w.registrar or "No information",
+                "status": ", ".join(w.status) if w.status else "No information",
+                "name_servers": "\n".join(w.name_servers) if w.name_servers else "No information",
+                "expiration_date": w.expiration_date,
+                "result": "success",
+                "lookup_type": lookup_type
+            }
+        except Exception as e:
+            logger.error(f"Local WHOIS lookup failed for {domain}: {str(e)}")
+            result = {
+                "domain": domain,
+                "result": "error",
+                "message": f"Local WHOIS lookup failed: {str(e)}",
+                "lookup_type": lookup_type
+            }
+    else:
+        # Parse API response
+        if data.get("result") == "error":
+            logger.error(f"API returned error for {domain}: {data.get('message')}")
+            result = {
+                "domain": domain,
+                "result": "error",
+                "message": data.get("message", "Unknown error"),
+                "lookup_type": lookup_type
+            }
+        else:
             res = data.get("result", {})
-            logger.debug(f"[{domain}] Extracted 'result' field: {res}")
-
-            results.append({
+            result = {
                 "domain": domain,
                 "creation_date": res.get("creation_date", "No information"),
                 "registrar": res.get("registrar", "No information"),
                 "status": ", ".join(res.get("status")) if isinstance(res.get("status"), list) else res.get("status", "No information"),
-                "name_servers": "\n".join([ns.lower() for ns in res.get("name_servers", [])]) if isinstance(res.get("name_servers"), list) else res.get("name_servers", "No information"),
+                "name_servers": "\n".join(ns.lower() for ns in res.get("name_servers", [])) if isinstance(res.get("name_servers"), list) else res.get("name_servers", "No information"),
                 "expiration_date": res.get("expiration_date"),
-                "result": "success"
-            })
+                "result": "success",
+                "lookup_type": lookup_type
+            }
 
-    return { "results": results, "minRemainingDay": min_remaining_day }
+    # Cache the result with expiry
+    cache[domain] = (result, now + CACHE_TTL)
+    return result
