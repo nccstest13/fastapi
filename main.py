@@ -7,9 +7,23 @@ import whoisdomain
 app = FastAPI()
 logger = logging.getLogger("uvicorn.error")  # Or your logger
 
-API_KEY = "your_api_key_here"
+import os
+
+API_KEY = os.getenv("APILAYER_KEY")
+if not API_KEY:
+    raise RuntimeError("APILAYER_KEY environment variable not set")
 CACHE_TTL = timedelta(hours=1)
 cache = {}
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or restrict to your frontend domain for security
+    allow_credentials=True,
+    allow_methods=["*"],  # allows OPTIONS, GET, POST, etc.
+    allow_headers=["*"],
+)
 
 async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict):
     url = f"https://api.apilayer.com/whois/query?domain={domain}"
