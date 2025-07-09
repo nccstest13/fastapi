@@ -30,6 +30,17 @@ else:
 
 app = FastAPI()
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or specific domains for security
+    allow_credentials=True,
+    allow_methods=["*"],  # this must allow OPTIONS and POST
+    allow_headers=["*"],
+)
+
+
 API_KEY = os.getenv("APILAYER_KEY")
 if not API_KEY:
     raise RuntimeError("APILAYER_KEY env var is not set")
