@@ -39,8 +39,7 @@ async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict)
     resp.raise_for_status()
     return resp.json()
 
-@app.post("/whois")
-async def whois_lookup(domain: str = Body(...)):
+async def whois_lookup(domain: str = Body(..., embed=False)):
     domain = domain.lower().strip()
     now = datetime.utcnow()
 
