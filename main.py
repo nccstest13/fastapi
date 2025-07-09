@@ -38,7 +38,7 @@ async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict)
     resp = await client.get(url, headers=headers, timeout=10.0)
     logger.debug(f"API response status for {domain}: {resp.status_code}")
     if resp.status_code == 404:
-        text = await resp.text()
+        text = resp.text()
         logger.debug(f"API 404 for {domain}: {text}")
         return {"result": "error", "message": "Domain not registered", "raw": text}, resp.headers
     resp.raise_for_status()
