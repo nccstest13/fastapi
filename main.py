@@ -25,7 +25,7 @@ async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict)
     return response.status_code, json_data
 
 @app.post("/whois")
-async def whois_lookup(domain: str = Body(..., embed=True)):
+async def whois_lookup(domain: str = Body(..., embed=False)):
     domain = domain.lower().strip()
     now = datetime.utcnow()
     logger.info(f"Received WHOIS lookup request for domain: {domain}")
