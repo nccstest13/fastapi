@@ -3,4 +3,4 @@ uvicorn[standard]
 httpx
 pydantic
 typing-extensions
-whoisdomain
+grabio
