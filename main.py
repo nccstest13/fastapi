@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import grabio
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, Optional
 
 # Logger setup
 logger = logging.getLogger("whois_api")
@@ -18,7 +18,7 @@ logger.handlers = [handler]
 
 app = FastAPI()
 
-# CORS config (allow all origins for testing, lock down in prod)
+# CORS config (allow all origins for testing, tighten in prod)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,7 +38,9 @@ async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict)
     resp = await client.get(url, headers=headers, timeout=10.0)
     logger.debug(f"API response status for {domain}: {resp.status_code}")
     if resp.status_code == 404:
-        return {"result": "error", "message": "Domain not registered", "raw": await resp.text()}, resp.headers
+        text = await resp.text()
+        logger.debug(f"API 404 for {domain}: {text}")
+        return {"result": "error", "message": "Domain not registered", "raw": text}, resp.headers
     resp.raise_for_status()
     json_data = resp.json()
     logger.debug(f"API raw response for {domain}: {json_data}")
@@ -49,14 +51,14 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
     domain = domain.strip().lower()
     now = datetime.utcnow()
 
+    # Check cache
     if domain in cache:
         cached_result, expiry = cache[domain]
         if expiry > now:
             logger.debug(f"Cache hit for domain {domain}")
-            # Append ', cached' if not present
             lookup_type = cached_result.get("lookup_type", "")
             if "cached" not in lookup_type:
-                cached_result["lookup_type"] = lookup_type + ", cached" if lookup_type else "cached"
+                cached_result["lookup_type"] = f"{lookup_type}, cached" if lookup_type else "cached"
             return cached_result
         else:
             logger.debug(f"Cache expired for domain {domain}")
@@ -134,32 +136,39 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
                     "remaining_api_calls": None
                 }
 
-        # Parse API result
-        res = api_result.get("result", {})
-        creation_date = res.get("creation_date") or "No information"
-        registrar = res.get("registrar") or "No information"
-        status = res.get("status")
-        if isinstance(status, list):
-            status = ", ".join(status)
-        else:
-            status = status or "No information"
-        name_servers = res.get("name_servers")
-        if isinstance(name_servers, list):
-            name_servers = "\n".join(ns.lower() for ns in name_servers)
-        else:
-            name_servers = name_servers or "No information"
+    # Parse API result
+    res = api_result.get("result", {})
+    creation_date = res.get("creation_date") or "No information"
+    registrar = res.get("registrar") or "No information"
+    status = res.get("status")
+    if isinstance(status, list):
+        status = ", ".join(status)
+    else:
+        status = status or "No information"
+    name_servers = res.get("name_servers")
+    if isinstance(name_servers, list):
+        name_servers = "\n".join(ns.lower() for ns in name_servers)
+    else:
+        name_servers = name_servers or "No information"
 
-        result = {
-            "domain": domain,
-            "creation_date": creation_date,
-            "registrar": registrar,
-            "status": status,
-            "name_servers": name_servers,
-            "expiration_date": res.get("expiration_date"),
-            "result": "success",
-            "lookup_type": "whois_api",
-            "remaining_api_calls": int(api_headers.get("X-RateLimit-Remaining", -1))
-        }
+    # Extract remaining calls safely
+    raw_remaining = api_headers.get("X-RateLimit-Remaining")
+    try:
+        remaining_api_calls: Optional[int] = int(raw_remaining) if raw_remaining is not None else None
+    except ValueError:
+        remaining_api_calls = None
 
-        cache[domain] = (result, now + CACHE_TTL)
-        return result
+    result = {
+        "domain": domain,
+        "creation_date": creation_date,
+        "registrar": registrar,
+        "status": status,
+        "name_servers": name_servers,
+        "expiration_date": res.get("expiration_date"),
+        "result": "success",
+        "lookup_type": "whois_api",
+        "remaining_api_calls": remaining_api_calls
+    }
+
+    cache[domain] = (result, now + CACHE_TTL)
+    return result
