@@ -50,13 +50,17 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
     now = datetime.utcnow()
 
     if domain in cache:
-        cached_result, expiry = cache[domain]
-        if expiry > now:
-            logger.debug(f"Cache hit for domain {domain}")
-            return cached_result
-        else:
-            logger.debug(f"Cache expired for domain {domain}")
-            cache.pop(domain)
+    cached_result, expiry = cache[domain]
+    if expiry > now:
+        logger.debug(f"Cache hit for domain {domain}")
+        # Append ', cached' if not present
+        lookup_type = cached_result.get("lookup_type", "")
+        if "cached" not in lookup_type:
+            cached_result["lookup_type"] = lookup_type + ", cached" if lookup_type else "cached"
+        return cached_result
+    else:
+        logger.debug(f"Cache expired for domain {domain}")
+        cache.pop(domain)
 
     headers = {"apikey": API_KEY}
     async with httpx.AsyncClient() as client:
