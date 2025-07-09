@@ -1,85 +1,96 @@
+import os
+import sys
 import logging
-from fastapi import FastAPI, Body, HTTPException
-from datetime import datetime, timedelta
+from fastapi import FastAPI, Body
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
+from httpx import ReadTimeout, RequestError
 import whoisdomain
+from datetime import datetime, timedelta
+
+# Setup logger
+logger = logging.getLogger("whois_logger")
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler(sys.stdout)
+formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+handler.setFormatter(formatter)
+if not logger.hasHandlers():
+    logger.addHandler(handler)
+else:
+    logger.handlers.clear()
+    logger.addHandler(handler)
 
 app = FastAPI()
-logger = logging.getLogger("uvicorn.error")  # Or your logger
 
-import os
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
 
 API_KEY = os.getenv("APILAYER_KEY")
 if not API_KEY:
-    raise RuntimeError("APILAYER_KEY environment variable not set")
+    raise RuntimeError("APILAYER_KEY environment variable is not set")
+
+cache = {}  # domain -> (result_dict, expiry)
 CACHE_TTL = timedelta(hours=1)
-cache = {}
-
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # or restrict to your frontend domain for security
-    allow_credentials=True,
-    allow_methods=["*"],  # allows OPTIONS, GET, POST, etc.
-    allow_headers=["*"],
-)
+PER_DOMAIN_DELAY_SECONDS = 2  # for estimated time calculation
 
 async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict):
     url = f"https://api.apilayer.com/whois/query?domain={domain}"
-    logger.debug(f"Calling apilayer WHOIS API for domain: {domain}")
-    response = await client.get(url, headers=headers, timeout=10.0)
-    logger.debug(f"API Response status code: {response.status_code}")
-    try:
-        json_data = response.json()
-        logger.debug(f"API raw response for {domain}: {json_data}")
-    except Exception as e:
-        logger.error(f"Failed to parse JSON response from API for {domain}: {e}")
-        json_data = None
-    return response.status_code, json_data
+    resp = await client.get(url, headers=headers, timeout=10.0)
+    logger.debug(f"API call status for {domain}: {resp.status_code}")
+    logger.debug(f"API raw response for {domain}: {resp.text}")
+    resp.raise_for_status()
+    return resp
 
 @app.post("/whois")
-async def whois_lookup(domain: str = Body(..., embed=False)):
+async def whois_lookup(domain: str = Body(...)):
     domain = domain.lower().strip()
     now = datetime.utcnow()
-    logger.info(f"Received WHOIS lookup request for domain: {domain}")
+    logger.info(f"Processing lookup for domain: {domain}")
+
+    # Estimate processing time (just 1 domain here)
+    est_seconds = PER_DOMAIN_DELAY_SECONDS
+    est_msg = f"Estimated processing time: ~{est_seconds} seconds."
 
     # Cache check
     cached = cache.get(domain)
     if cached and cached[1] > now:
-        logger.info(f"Cache hit for domain: {domain}")
-        return cached[0]
-    if cached:
-        logger.info(f"Cache expired for domain: {domain}")
+        logger.debug(f"Cache hit for domain: {domain}")
+        cached_result = cached[0]
+        cached_result["estimated_time"] = est_msg
+        return cached_result
+    elif cached:
+        logger.debug(f"Cache expired for domain: {domain}")
 
     headers = {"apikey": API_KEY}
     async with httpx.AsyncClient() as client:
         try:
-            status_code, data = await fetch_whois_api(client, domain, headers)
-            if status_code == 404:
-                logger.warning(f"Domain {domain} not registered (404 from API).")
-                result = {
-                    "domain": domain,
-                    "result": "error",
-                    "message": "Domain not registered",
-                    "lookup_type": "whois_api"
-                }
-                cache[domain] = (result, now + CACHE_TTL)
-                return result
-            elif status_code != 200:
-                logger.error(f"API returned status code {status_code} for domain {domain}")
-                raise HTTPException(status_code=502, detail="Bad response from WHOIS API")
-            lookup_type = "whois_api"
-        except Exception as e:
-            logger.warning(f"API lookup failed for {domain} with error: {e}. Falling back to local lookup.")
+            try:
+                resp = await fetch_whois_api(client, domain, headers)
+                lookup_type = "whois_api"
+                remaining = resp.headers.get("X-RateLimit-Remaining")
+                data = resp.json()
+            except ReadTimeout:
+                logger.warning(f"API timeout on {domain}, retrying once")
+                resp = await fetch_whois_api(client, domain, headers)
+                lookup_type = "whois_api"
+                remaining = resp.headers.get("X-RateLimit-Remaining")
+                data = resp.json()
+        except (ReadTimeout, RequestError, httpx.HTTPStatusError) as e:
+            logger.warning(f"API lookup failed for {domain}: {str(e)}. Falling back to local lookup.")
             lookup_type = "local"
             data = None
+            remaining = None
 
     if lookup_type == "local":
         try:
-            w = whoisdomain.Whois(domain)
-            raw_local_data = vars(w)
-            logger.debug(f"Local WHOIS raw data for {domain}: {raw_local_data}")
+            w = whoisdomain.query(domain)
+            logger.debug(f"Local WHOIS raw data for {domain}: {w}")
             result = {
                 "domain": domain,
                 "creation_date": w.creation_date or "No information",
@@ -88,20 +99,43 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
                 "name_servers": "\n".join(w.name_servers) if w.name_servers else "No information",
                 "expiration_date": w.expiration_date,
                 "result": "success",
-                "lookup_type": lookup_type
+                "lookup_type": lookup_type,
+                "estimated_time": est_msg,
+                "rate_limit_remaining": remaining,
             }
         except Exception as e:
-            logger.error(f"Local WHOIS lookup failed for {domain}: {e}")
+            logger.error(f"Local WHOIS lookup failed for {domain}: {str(e)}")
             result = {
                 "domain": domain,
                 "result": "error",
-                "message": f"Local WHOIS lookup failed: {e}",
-                "lookup_type": lookup_type
+                "message": f"Local WHOIS lookup failed: {str(e)}",
+                "lookup_type": lookup_type,
+                "estimated_time": est_msg,
+                "rate_limit_remaining": remaining,
             }
-            return result
     else:
-        # Parse API response assuming the structure you gave before
-        try:
+        # API response handling
+        if resp.status_code == 404:
+            logger.info(f"Domain not registered: {domain}")
+            result = {
+                "domain": domain,
+                "result": "error",
+                "message": "Domain not registered",
+                "lookup_type": lookup_type,
+                "estimated_time": est_msg,
+                "rate_limit_remaining": remaining,
+            }
+        elif data.get("result") == "error":
+            logger.error(f"API error for {domain}: {data.get('message')}")
+            result = {
+                "domain": domain,
+                "result": "error",
+                "message": data.get("message", "Unknown error"),
+                "lookup_type": lookup_type,
+                "estimated_time": est_msg,
+                "rate_limit_remaining": remaining,
+            }
+        else:
             res = data.get("result", {})
             result = {
                 "domain": domain,
@@ -111,21 +145,13 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
                 "name_servers": "\n".join(ns.lower() for ns in res.get("name_servers", [])) if isinstance(res.get("name_servers"), list) else res.get("name_servers", "No information"),
                 "expiration_date": res.get("expiration_date"),
                 "result": "success",
-                "lookup_type": lookup_type
+                "lookup_type": lookup_type,
+                "estimated_time": est_msg,
+                "rate_limit_remaining": remaining,
             }
-        except Exception as e:
-            logger.error(f"Error parsing API data for {domain}: {e}")
-            result = {
-                "domain": domain,
-                "result": "error",
-                "message": f"Error parsing API response: {e}",
-                "lookup_type": lookup_type
-            }
-            return result
 
-    # Cache successful results only
+    # Cache only successful lookups
     if result.get("result") == "success":
         cache[domain] = (result, now + CACHE_TTL)
-        logger.info(f"Cached result for domain: {domain}")
 
     return result
