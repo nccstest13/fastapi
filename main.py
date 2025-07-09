@@ -88,58 +88,48 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
             logger.warning(f"API lookup failed for {domain}, falling back to grabio")
             # Fallback to grabio
             try:
-    g = grabio.Grabio(f"https://{domain}")
-    whois_data = g.whois_info()
-    logger.debug(f"Local grabio raw data for {domain}: {whois_data}")
+                g = grabio.Grabio(f"https://{domain}")
+                whois_data = g.whois_info()
+                logger.debug(f"Local grabio raw data for {domain}: {whois_data}")
 
-    # Parse info from whois_data dict (may vary depending on TLD)
-    creation_date = whois_data.get("creation_date", "No information")
-    registrar = whois_data.get("registrar", "No information")
-    status = whois_data.get("status")
-    if isinstance(status, list):
-        status = ", ".join(status)
-    else:
-        status = status or "No information"
-    name_servers = whois_data.get("name_servers")
-    if isinstance(name_servers, list):
-        name_servers = "\n".join(ns.lower() for ns in name_servers)
-    else:
-        name_servers = name_servers or "No information"
-    expiration_date = whois_data.get("expiration_date")
+                # Parse info from whois_data dict (may vary depending on TLD)
+                creation_date = whois_data.get("creation_date", "No information")
+                registrar = whois_data.get("registrar", "No information")
+                status = whois_data.get("status")
+                if isinstance(status, list):
+                    status = ", ".join(status)
+                else:
+                    status = status or "No information"
+                name_servers = whois_data.get("name_servers")
+                if isinstance(name_servers, list):
+                    name_servers = "\n".join(ns.lower() for ns in name_servers)
+                else:
+                    name_servers = name_servers or "No information"
+                expiration_date = whois_data.get("expiration_date")
 
-    result = {
-        "domain": domain,
-        "creation_date": creation_date,
-        "registrar": registrar,
-        "status": status,
-        "name_servers": name_servers,
-        "expiration_date": expiration_date,
-        "result": "success",
-        "lookup_type": "local",
-        "remaining_api_calls": None
-    }
-    cache[domain] = (result, now + CACHE_TTL)
-    return result
+                result = {
+                    "domain": domain,
+                    "creation_date": creation_date,
+                    "registrar": registrar,
+                    "status": status,
+                    "name_servers": name_servers,
+                    "expiration_date": expiration_date,
+                    "result": "success",
+                    "lookup_type": "local",
+                    "remaining_api_calls": None
+                }
+                cache[domain] = (result, now + CACHE_TTL)
+                return result
 
-except Exception as e:
-    logger.error(f"Local WHOIS lookup failed for {domain} (grabio): {e}")
-    return {
-        "domain": domain,
-        "result": "error",
-        "message": f"Local WHOIS lookup failed: {str(e)}",
-        "lookup_type": "local",
-        "remaining_api_calls": None
-    }
-        # Process API result
-        if api_result.get("result") == "error":
-            logger.error(f"API returned error for {domain}: {api_result.get('message')}")
-            return {
-                "domain": domain,
-                "result": "error",
-                "message": api_result.get("message", "Unknown error"),
-                "lookup_type": "whois_api",
-                "remaining_api_calls": int(api_headers.get("X-RateLimit-Remaining", -1))
-            }
+            except Exception as e:
+                logger.error(f"Local WHOIS lookup failed for {domain} (grabio): {e}")
+                return {
+                    "domain": domain,
+                    "result": "error",
+                    "message": f"Local WHOIS lookup failed: {str(e)}",
+                    "lookup_type": "local",
+                    "remaining_api_calls": None
+                }
 
         res = api_result.get("result", {})
         creation_date = res.get("creation_date") or "No information"
