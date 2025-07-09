@@ -18,7 +18,7 @@ logger.handlers = [handler]
 
 app = FastAPI()
 
-# CORS config (allow all origins for testing, tighten for prod)
+# CORS config (allow all origins for testing, lock down in prod)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,7 +38,7 @@ async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict)
     resp = await client.get(url, headers=headers, timeout=10.0)
     logger.debug(f"API response status for {domain}: {resp.status_code}")
     if resp.status_code == 404:
-        return {"result": "error", "message": "Domain not registered", "raw": await resp.text()}
+        return {"result": "error", "message": "Domain not registered", "raw": await resp.text()}, resp.headers
     resp.raise_for_status()
     json_data = resp.json()
     logger.debug(f"API raw response for {domain}: {json_data}")
@@ -50,17 +50,17 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
     now = datetime.utcnow()
 
     if domain in cache:
-    cached_result, expiry = cache[domain]
-    if expiry > now:
-        logger.debug(f"Cache hit for domain {domain}")
-        # Append ', cached' if not present
-        lookup_type = cached_result.get("lookup_type", "")
-        if "cached" not in lookup_type:
-            cached_result["lookup_type"] = lookup_type + ", cached" if lookup_type else "cached"
-        return cached_result
-    else:
-        logger.debug(f"Cache expired for domain {domain}")
-        cache.pop(domain)
+        cached_result, expiry = cache[domain]
+        if expiry > now:
+            logger.debug(f"Cache hit for domain {domain}")
+            # Append ', cached' if not present
+            lookup_type = cached_result.get("lookup_type", "")
+            if "cached" not in lookup_type:
+                cached_result["lookup_type"] = lookup_type + ", cached" if lookup_type else "cached"
+            return cached_result
+        else:
+            logger.debug(f"Cache expired for domain {domain}")
+            cache.pop(domain)
 
     headers = {"apikey": API_KEY}
     async with httpx.AsyncClient() as client:
@@ -96,7 +96,6 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
                 whois_data = g.whois_info()
                 logger.debug(f"Local grabio raw data for {domain}: {whois_data}")
 
-                # Parse info from whois_data dict (may vary depending on TLD)
                 creation_date = whois_data.get("creation_date", "No information")
                 registrar = whois_data.get("registrar", "No information")
                 status = whois_data.get("status")
@@ -135,6 +134,7 @@ async def whois_lookup(domain: str = Body(..., embed=False)):
                     "remaining_api_calls": None
                 }
 
+        # Parse API result
         res = api_result.get("result", {})
         creation_date = res.get("creation_date") or "No information"
         registrar = res.get("registrar") or "No information"
