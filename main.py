@@ -46,6 +46,13 @@ async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict)
     logger.debug(f"API raw response for {domain}: {json_data}")
     return json_data, resp.headers
 
+from fastapi.responses import PlainTextResponse
+
+@app.get("/status", response_class=PlainTextResponse)
+def status():
+    return "Active"
+
+
 @app.post("/whois")
 async def whois_lookup(domain: str = Body(..., embed=False)):
     domain = domain.strip().lower()
