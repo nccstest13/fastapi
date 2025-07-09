@@ -9,7 +9,7 @@ from httpx import ReadTimeout, RequestError
 import whoisdomain
 import asyncio
 from datetime import datetime, timedelta
-
+from fastapi import Body
 # Setup logging to stdout with formatter
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -45,9 +45,6 @@ API_KEY = os.getenv("APILAYER_KEY")
 if not API_KEY:
     raise RuntimeError("APILAYER_KEY env var is not set")
 
-class DomainRequest(BaseModel):
-    domain: str
-
 # Simple in-memory cache: domain -> (result_dict, expiry_datetime)
 cache: Dict[str, tuple] = {}
 CACHE_TTL = timedelta(hours=1)
@@ -59,7 +56,7 @@ async def fetch_whois_api(client: httpx.AsyncClient, domain: str, headers: dict)
     return resp.json()
 
 @app.post("/whois")
-async def whois_lookup(request: DomainRequest):
+async def whois_lookup(domain: str = Body(...)):
     domain = request.domain.lower().strip()
     now = datetime.utcnow()
 
